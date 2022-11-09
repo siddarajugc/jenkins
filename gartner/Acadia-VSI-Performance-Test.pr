@@ -1,0 +1,148 @@
+// vim: syntax=Jenkinsfile ts=4 expandtab sw=4 sts=4:
+/*
+Licensed Materials - Property of IBM
+
+COPYRIGHT International Business Machines Corp. 2015, 2022
+All Rights Reserved
+
+US Government Users Restricted Rights - Use, duplication or
+disclosure restricted by GSA ADP Schedule Contract with IBM Corp.
+*/
+
+gitBranchLibrary()
+
+def FAILED_STAGE
+
+pipeline {
+    agent {
+        /* pod template defined in jenkins to spawn pods in jenkins */
+        label 'acadia-build-signer-golang'
+    }
+        parameters {
+	        string(name: 'REGION',defaultValue: params.REGION ?: 'eu-gb',description: 'Provide region to create cloud resources e.g:eu-gb')
+	        string(name: 'ZONE',defaultValue: params.ZONE ?: 'eu-gb-2',description: 'Provide Zone to create cloud resources e.g: eu-gb-1')
+	        string(name: 'RESOURCE_ZONES',defaultValue: params.RESOURCE_ZONES ?: 'perf_prefil',description: 'select single_zone if resource to be created on one zone only, Or select all_zones to create resource on all three zones')
+	        string(name: 'IBMCLOUD_IS_NG_API_ENDPOINT',defaultValue: params.IBMCLOUD_IS_NG_API_ENDPOINT ?: 'https://eu-gb.iaas.cloud.ibm.com/v1',description: 'Provide endpoint of MZR')
+	        string(name: 'VPC_ID',defaultValue: params.VPC_ID ?: 'r134-eb639f4d-f871-493a-b088-e9abe4aa73c7',description: 'Provide VPC ID of the MZR')
+	        string(name: 'SUBNET_ID',defaultValue: params.SUBNET_ID ?: '0711-f6d59b1f-815a-4cb5-a812-e96b1c4d6ba2',description: 'Provide subnet ID if resource to be created on single zone')
+	        string(name: 'IMAGE_ID',defaultValue: params.IMAGE_ID ?: 'r134-ab47c72d-b11c-417b-a442-9f1ca6a6f5ed',description: 'Provide Image_ID for the instance to be created')
+	        string(name: 'INSTANCE_PROFILE',defaultValue: params.INSTANCE_PROFILE ?: 'bx2-16x64',description: 'Provide Instance profile if any specific')
+	        string(name: 'VOLUME_ID',defaultValue: params.VOLUME_ID ?: 'r018-fe61173c-f209-4f6a-b8ff-378d3b55fd3c',description: 'Provide volume ID which is in list format')
+            string(name: 'CONTAINER_NAME',defaultValue: params.CONTAINER_NAME ?: '2.0.0',description: 'Provide container version from aftifact default:2.0.0')
+	        string(name: 'BLOCK_SIZE',defaultValue: params.BLOCK_SIZE ?: '4k,',description: 'Provide required FIO block size value e.g:4k')
+	        string(name: 'IODEPTH',defaultValue: params.IODEPTH ?: '1,4',description: 'Provide FIO IODEPTH value e.g:1,')
+	        string(name: 'NUMBER_JOBS',defaultValue: params.NUMBER_JOBS ?: '1 4',description: 'Provide FIO Number of jobs value e.g:1')
+            string(name: 'RUNTIME',defaultValue: params.RUNTIME ?: '10',description: 'Provide runtime for FIO jobs e.g:10 in secs')
+            string(name: 'RW_MODE',defaultValue: params.RW_MODE ?: 'randread randwrite randrw',description: 'Provide read write mode e.g:randread randwrite')
+            string(name: 'SSH_KEY_NAME',defaultValue: params.SSH_KEY_NAME ?: 'siddaraju-ssh-laptop',description: 'Provide SSH Key name to access cloud resource')
+            string(name: 'SLEEP_TIME',defaultValue: params.SLEEP_TIME ?: '150',description: 'Sleep Time required to execute user-data file should be calculated based on our FIO jobs')
+            string(name: 'BUCKET_NAME',defaultValue: params.BUCKET_NAME ?: 'cos-acadia-gartner',description: 'Provide COS bucket name to store fio results')
+        }
+    environment {
+        ACADIA_USER = 'genctl-acadia'
+        GITHUB_JOB_NAME = "${env.JOB_NAME} CI/CD"
+        ARTIF_REPO = 'wcp-acadia-team-docker-virtual.artifactory.swg-devops.com'
+        CONTAINER_PATH="acadia-terraform:${params.CONTAINER_NAME}"
+        REGION = "${params.REGION}"
+        PR_REGION = 'dal'
+        COS_END_POINT = 's3.us-west.cloud-object-storage.test.appdomain.cloud'
+        RESOURCE_ZONES = "${params.RESOURCE_ZONES}"
+        VOLUME_ID = "${params.VOLUME_ID}"
+        IBM_ENV = 'test.env'
+        IBMCLOUD_IS_NG_API_ENDPOINT = "${params.IBMCLOUD_IS_NG_API_ENDPOINT}"
+        SLEEP_TIME = "${params.SLEEP_TIME.toInteger()}"
+        IBMCLOUD_ACCESS_KEY_ID = credentials('IBMCLOUD_ACCESS_KEY_ID_NEW')
+        IBMCLOUD_SECRET_ACCESS_KEY = credentials('IBMCLOUD_SECRET_ACCESS_KEY_NEW')
+        ACADIA_PROD_API_KEY = credentials('ACADIA-SDS-CLOUD-API-KEY')
+        INSTANCE_PROFILE = "${params.INSTANCE_PROFILE}"
+        BLOCK_SIZE = "${params.BLOCK_SIZE}"
+        IODEPTH = "${params.IODEPTH}"
+        RW_MODE = "${params.RW_MODE}"
+        NUMBER_JOBS = "${params.NUMBER_JOBS}"
+        RUNTIME = "${params.RUNTIME.toInteger()}"
+        ZONE = "${params.ZONE}"
+        VPC_ID = "${params.VPC_ID}"
+        SUBNET_ID = "${params.SUBNET_ID}"
+        IMAGE_ID = "${params.IMAGE_ID}"
+        SSH_KEY_NAME = "${params.SSH_KEY_NAME}"
+        BUCKET_NAME = "${params.BUCKET_NAME}"
+    }
+    stages {
+        stage('SCM') {
+            steps {
+                script { FAILED_STAGE = env.STAGE_NAME }
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: '*/acadia-perf' ]],
+                    extensions: [
+                        [$class: 'CleanBeforeCheckout'],
+                        [$class: 'RelativeTargetDirectory', relativeTargetDir: 'gartner'],
+                        [$class: 'SubmoduleOption', recursiveSubmodules: true, parentCredentials: true]
+                    ],
+                    userRemoteConfigs: [[
+                        credentialsId: '7af45ada-c7f0-4ce0-84ad-73ccabc7da15',
+                        url: "git@github.ibm.com:genctl-acadia/gartner.git"
+                    ]]
+                ])
+            }
+        }
+        stage('Run gartner benchmark') {
+            steps {
+                script { FAILED_STAGE = env.STAGE_NAME }
+                script {
+                    dir('gartner') {
+                        docker.withRegistry('https://wcp-acadia-team-docker-virtual.artifactory.swg-devops.com', 'artifactory_token') {
+                            withCredentials([
+                                usernamePassword(credentialsId: 'artifactory_token',
+                                usernameVariable: 'ARTIFACTORY_LOGIN',
+                                passwordVariable: 'ARTIFACTORY_ACCESS_TOKEN')
+                            ]) {
+                            sh '''
+                                docker pull ${ARTIF_REPO}/${CONTAINER_PATH}
+                                docker run -v $(pwd)/availability_${RESOURCE_ZONES}/:/availability_${RESOURCE_ZONES} \
+                                --entrypoint /availability_${RESOURCE_ZONES}/terraform.sh \
+                                -w /availability_${RESOURCE_ZONES} \
+                                --env-file "$(pwd)/availability_${RESOURCE_ZONES}/${IBM_ENV}"\
+                                -e WORKDIR=/availability_${RESOURCE_ZONES} \
+                                -e IBMCLOUD_IS_NG_API_ENDPOINT="${IBMCLOUD_IS_NG_API_ENDPOINT}"\
+                                -e SLEEP_TIME="${SLEEP_TIME}"\
+                                -e TF_VAR_IBMCLOUD_ACCESS_KEY_ID="${IBMCLOUD_ACCESS_KEY_ID}" \
+                                -e TF_VAR_CLOUD_API_KEY="${ACADIA_PROD_API_KEY}" \
+                                -e TF_VAR_IBMCLOUD_SECRET_ACCESS_KEY="${IBMCLOUD_SECRET_ACCESS_KEY}" \
+                                -e TF_VAR_INSTANCE_PROFILE="${INSTANCE_PROFILE}"\
+                                -e TF_VAR_BLOCK_SIZE="${BLOCK_SIZE}"\
+                                -e TF_VAR_IODEPTH="${IODEPTH}"\
+                                -e TF_VAR_RUNTIME="${RUNTIME}"\
+                                -e TF_VAR_NUMBER_JOBS="${NUMBER_JOBS}"\
+                                -e TF_VAR_RW_MODE="${RW_MODE}"\
+                                -e TF_VAR_VOLUME_ID="[${VOLUME_ID}]"\
+                                -e TF_VAR_ZONE="${ZONE}"\
+                                -e RESOURCE_ZONES="${RESOURCE_ZONES}"\
+                                -e TF_VAR_VPC_ID="${VPC_ID}"\
+                                -e TF_VAR_SUBNET_ID="${SUBNET_ID}"\
+                                -e TF_VAR_IMAGE_ID="${IMAGE_ID}"\
+                                -e BUCKET_NAME="${BUCKET_NAME}"\
+                                -e TF_VAR_BUCKET_NAME="${BUCKET_NAME}"\
+                                -e TF_VAR_SSH_KEY_NAME="${SSH_KEY_NAME}"\
+                                -e TF_VAR_COS_END_POINT="${COS_END_POINT}"\
+                                -e TF_VAR_REGION="${REGION}"\
+                                -i ${ARTIF_REPO}/${CONTAINER_PATH} \
+                                ${PR_REGION}
+                            '''
+                            archiveArtifacts artifacts:
+                                "availability_${RESOURCE_ZONES}/logs/*.*"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                cleanWs()
+            }
+        }
+    }
+}

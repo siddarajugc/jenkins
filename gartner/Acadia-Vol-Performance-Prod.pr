@@ -1,0 +1,115 @@
+// vim: syntax=Jenkinsfile ts=4 expandtab sw=4 sts=4:
+/*
+Licensed Materials - Property of IBM
+
+COPYRIGHT International Business Machines Corp. 2015, 2022
+All Rights Reserved
+
+US Government Users Restricted Rights - Use, duplication or
+disclosure restricted by GSA ADP Schedule Contract with IBM Corp.
+*/
+
+gitBranchLibrary()
+
+def FAILED_STAGE
+
+pipeline {
+    agent {
+        /* pod template defined in jenkins to spawn pods in jenkins */
+        label 'acadia-build-signer-golang'
+    }
+        parameters {
+	        string(name: 'REGION',defaultValue: params.REGION ?: 'eu-gb',description: 'Provide region to create cloud resources e.g:eu-gb')
+	        string(name: 'ZONE',defaultValue: params.ZONE ?: 'eu-gb-2',description: 'Provide Zone to create cloud resources e.g: eu-gb-1')
+	        string(name: 'IBM_ENV',defaultValue: params.IBM_ENV ?: 'prod.env',description: 'Provide the env file stage or prod e.g: prod.env Or test.env for stage')
+	        string(name: 'RESOURCE_ZONES',defaultValue: params.RESOURCE_ZONES ?: 'prefil_volume',description: 'select single_zone if resource to be created on one zone only, Or select all_zones to create resource on all three zones')
+	        string(name: 'IBMCLOUD_IS_NG_API_ENDPOINT',defaultValue: params.IBMCLOUD_IS_NG_API_ENDPOINT ?: 'https://eu-gb.iaas.cloud.ibm.com/v1',description: 'Provide endpoint of MZR')
+            string(name: 'CONTAINER_NAME',defaultValue: params.CONTAINER_NAME ?: '2.0.0',description: 'Provide container version from aftifact default:2.0.0')
+            string(name: 'VOLUME_COUNT',defaultValue: params.VOLUME_COUNT ?: '1',description: 'Provide number of volumes to be created e.g:1')
+            string(name: 'VOLUME_PROFILE',defaultValue: params.VOLUME_PROFILE ?: 'general-purpose',description: 'Provide volume profile name e.g: general-purpose')
+            string(name: 'VOLUME_CAPACITY',defaultValue: params.VOLUME_CAPACITY ?: '20',description: 'Provide size of the volume in Gb e.g: 20')
+            string(name: 'IOPS',defaultValue: params.IOPS ?: '500',description: 'Provide volume IOPS value e.g: 500')
+            string(name: 'CLOUD_API_KEY',defaultValue: params.CLOUD_API_KEY ?: 'ACADIA_PROD_API_KEY',description: 'Provide cloud account api key name e.g: ACADIA_PROD_API_KEY for prod or ACADIA-SDS-CLOUD-API-KEY for stage')
+        }
+    environment {
+        ACADIA_USER = 'genctl-acadia'
+        GITHUB_JOB_NAME = "${env.JOB_NAME} CI/CD"
+        ARTIF_REPO = 'wcp-acadia-team-docker-virtual.artifactory.swg-devops.com'
+        CONTAINER_PATH="acadia-terraform:${params.CONTAINER_NAME}"
+        REGION = "${params.REGION}"
+        PR_REGION = 'dal'
+        RESOURCE_ZONES = "${params.RESOURCE_ZONES}"
+        IBM_ENV = "${params.IBM_ENV}"
+        IBMCLOUD_IS_NG_API_ENDPOINT = "${params.IBMCLOUD_IS_NG_API_ENDPOINT}"
+        ACADIA_CLOUD_API_KEY = credentials("${params.CLOUD_API_KEY}")
+        ZONE = "${params.ZONE}"
+        VOLUME_COUNT = "${params.VOLUME_COUNT.toInteger()}"
+        VOLUME_PROFILE = "${params.VOLUME_PROFILE}"
+        VOLUME_CAPACITY = "${params.VOLUME_CAPACITY.toInteger()}"
+        IOPS = "${params.IOPS.toInteger()}"
+    }
+    stages {
+        stage('SCM') {
+            steps {
+                script { FAILED_STAGE = env.STAGE_NAME }
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: '*/acadia-perf' ]],
+                    extensions: [
+                        [$class: 'CleanBeforeCheckout'],
+                        [$class: 'RelativeTargetDirectory', relativeTargetDir: 'gartner'],
+                        [$class: 'SubmoduleOption', recursiveSubmodules: true, parentCredentials: true]
+                    ],
+                    userRemoteConfigs: [[
+                        credentialsId: '7af45ada-c7f0-4ce0-84ad-73ccabc7da15',
+                        url: "git@github.ibm.com:genctl-acadia/gartner.git"
+                    ]]
+                ])
+            }
+        }
+        stage('Run gartner benchmark') {
+            steps {
+                script { FAILED_STAGE = env.STAGE_NAME }
+                script {
+                    dir('gartner') {
+                        docker.withRegistry('https://wcp-acadia-team-docker-virtual.artifactory.swg-devops.com', 'artifactory_token') {
+                            withCredentials([
+                                usernamePassword(credentialsId: 'artifactory_token',
+                                usernameVariable: 'ARTIFACTORY_LOGIN',
+                                passwordVariable: 'ARTIFACTORY_ACCESS_TOKEN')
+                            ]) {
+                            sh '''
+                                docker pull ${ARTIF_REPO}/${CONTAINER_PATH}
+                                docker run -v $(pwd)/availability_${RESOURCE_ZONES}/:/availability_${RESOURCE_ZONES} \
+                                --entrypoint /availability_${RESOURCE_ZONES}/terraform.sh \
+                                -w /availability_${RESOURCE_ZONES} \
+                                --env-file "$(pwd)/availability_${RESOURCE_ZONES}/${IBM_ENV}"\
+                                -e WORKDIR=/availability_${RESOURCE_ZONES} \
+                                -e IBMCLOUD_IS_NG_API_ENDPOINT="${IBMCLOUD_IS_NG_API_ENDPOINT}"\
+                                -e TF_VAR_CLOUD_API_KEY="${ACADIA_CLOUD_API_KEY}" \
+                                -e TF_VAR_ZONE="${ZONE}"\
+                                -e TF_VAR_VOLUME_COUNT="${VOLUME_COUNT}"\
+                                -e TF_VAR_VOLUME_PROFILE="${VOLUME_PROFILE}"\
+                                -e TF_VAR_VOLUME_CAPACITY="${VOLUME_CAPACITY}"\
+                                -e TF_VAR_IOPS="${IOPS}"\
+                                -e TF_VAR_REGION="${REGION}"\
+                                -i ${ARTIF_REPO}/${CONTAINER_PATH} \
+                                ${PR_REGION}
+                            '''
+                            archiveArtifacts artifacts:
+                                "availability_${RESOURCE_ZONES}/logs/*.*"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                cleanWs()
+            }
+        }
+    }
+}
